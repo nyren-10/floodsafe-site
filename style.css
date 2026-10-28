@@ -795,6 +795,22 @@ footer>a:last-child {
     margin: 0
 }
 
+.video-frame {
+    overflow: hidden;
+    border: 1px solid #c7d3bf;
+    border-radius: 8px;
+    background: #102e31;
+}
+
+.video-frame video {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: contain;
+}
+
+
+
 @media(min-width:1600px) {
 
     header,
