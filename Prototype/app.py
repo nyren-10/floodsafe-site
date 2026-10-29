@@ -1,41 +1,73 @@
-"""Run: python Prototype/app.py, then open http://127.0.0.1:8502."""
-from flask import Flask, jsonify, request
-from planner import checked_polygon, make_grid, load_roads, plan_on_graph
+import streamlit as st
+import folium
+from streamlit_folium import st_folium
+from folium.plugins import Draw
+from shapely.geometry import shape
 
-app=Flask(__name__,static_folder='static',static_url_path='/static')
-app.config['MAX_CONTENT_LENGTH']=3*1024*1024
+# Import your backend functions directly (No Flask needed)
+from place_search import find_places
+from planner import make_grid, load_roads, plan_on_graph
 
-@app.get('/')
-def index(): return app.send_static_file('index.html')
+st.set_page_config(page_title="FloodSafe Prototype", layout="wide")
+st.title("FloodSafe: Disaster Logistics & Evacuation Engine")
 
-@app.get('/api/search')
-def search():
-    from place_search import find_places, SearchError
-    query=' '.join(request.args.get('q','').split())
-    if not 2<=len(query)<=200:
-        return jsonify(error='Enter a place name between 2 and 200 characters.'),400
+# --- 1. SEARCH ---
+st.sidebar.header("1. Location Search")
+query = st.sidebar.text_input("Search place:", "Udaipur, Rajasthan")
+if st.sidebar.button("Search"):
     try:
-        return jsonify(places=find_places(query.casefold()))
-    except SearchError as exc:
-        return jsonify(error=str(exc)),exc.status
+        results = find_places(query)
+        if results:
+            st.session_state['center'] = [results[0]['lat'], results[0]['lon']]
+            st.sidebar.success(f"Found: {results[0]['name']}")
+    except Exception as e:
+        st.sidebar.error(str(e))
 
-@app.post('/api/grid')
-def grid():
-    d=request.get_json()
-    return jsonify(make_grid(d['boundary'],d.get('resolution',9),d.get('density',3000)))
+if 'center' not in st.session_state:
+    st.session_state['center'] = [24.5854, 73.7125]
 
-@app.post('/api/plan')
-def plan():
-    d=request.get_json()
-    if not d.get('shelters'): raise ValueError('Place at least one shelter on the map.')
-    if len(d['shelters'])>20 or len(d.get('floods',[]))>30: raise ValueError('Use at most 20 shelters and 30 flood zones.')
-    if not d.get('grid',{}).get('features'): raise ValueError('Create the area hexagons first.')
-    if len(d['grid']['features'])>250: raise ValueError('Use at most 250 hexagons.')
-    p=checked_polygon(d['boundary'])
-    graph=load_roads(p.wkt)
-    return jsonify(plan_on_graph(graph,d['grid'],d['shelters'],d.get('floods',[]),d.get('threshold',25),d.get('speed',15),d.get('interval',30)))
+# --- 2. MAP DRAWING ---
+st.write("### Step 1: Draw a boundary on the map to begin")
+m = folium.Map(location=st.session_state['center'], zoom_start=13)
+Draw(export=False, draw_options={'polyline':False, 'circle':False, 'marker':False, 'circlemarker':False}).add_to(m)
 
-@app.errorhandler(Exception)
-def error(e):
-    app.logger.exception('Scenario request failed')
-    return jsonify(error=str(e)),400
+map_data = st_folium(m, height=450, use_container_width=True)
+
+# --- 3. ALLOCATION ENGINE ---
+if map_data and map_data.get("all_drawings"):
+    st.write("---")
+    st.write("### Step 2: Allocation Parameters")
+    boundary_geo = map_data["all_drawings"][-1]["geometry"]
+    
+    col1, col2 = st.columns(2)
+    resolution = col1.slider("H3 Resolution", 7, 11, 9)
+    density = col2.number_input("Population Density (people/km²)", value=3000)
+    
+    if st.button("Run FloodSafe Allocation Engine", type="primary"):
+        with st.spinner("Building H3 Grid, Fetching OSM Roads, and Calculating Routes..."):
+            try:
+                # 1. Generate Grid
+                grid = make_grid(boundary_geo, resolution, density)
+                
+                # 2. Create an automatic shelter at the center of the drawn area
+                center = shape(boundary_geo).centroid
+                shelters = [{"id": "s1", "name": "Primary Shelter", "lat": center.y, "lon": center.x, "capacity": 50000}]
+                floods = [] # No flood zones for basic test
+                
+                # 3. Load Graph
+                graph = load_roads(shape(boundary_geo).wkt)
+                
+                # 4. Plan Routes
+                plan = plan_on_graph(graph, grid, shelters, floods)
+                
+                st.success("✅ Engine execution complete!")
+                
+                st.write("### Evacuation Summary")
+                summary = plan['summary']
+                s_col1, s_col2, s_col3 = st.columns(3)
+                s_col1.metric("Total Demand (People)", f"{summary['demand']:,}")
+                s_col2.metric("Assigned to Shelter", f"{summary['assigned']:,}")
+                s_col3.metric("Unassigned", f"{summary['unassigned']:,}")
+                
+            except Exception as e:
+                st.error(f"Error during execution: {e}")
